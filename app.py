@@ -1,408 +1,243 @@
 from __future__ import annotations
 
-import io
+import html
 import json
-import time
-import zipfile
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
-import streamlit.components.v1 as components
-from spacy import displacy
 
-from nlp_utils import (
-    MAX_TEXT_CHARS,
-    analysis_summary,
-    csv_bytes,
-    dependency_rows,
-    entity_rows,
-    expanded_morphology_rows,
-    lemma_rows,
-    load_model,
-    morphology_rows,
-    normalize_input,
-    pos_distribution,
-    relationship_rows,
-    restore_doc,
-    sentence_rows,
-    serialize_doc,
-    stem_rows,
-    token_rows,
+from nlp_engine import AnalysisResult, analyze_text, load_model
+from ui import TASKS, hero, inject_css, metric_cards, result_header, task_buttons
+
+
+MAX_CHARS = 15_000
+SAMPLE_TEXT = (
+    "Microsoft acquired GitHub in 2018. Satya Nadella leads Microsoft, "
+    "and the company partners with OpenAI on artificial intelligence research."
 )
-from ui import hero, inject_css, metric_card, relation_pills, section_header
-from visualizations import pos_bar_chart, pos_donut_chart, relationship_graph
+
 
 st.set_page_config(
-    page_title="LexiScope · NLP Intelligence",
-    page_icon="◉",
+    page_title="NLP Dashboard",
+    page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        "About": "LexiScope is an interactive NLP dashboard built with Streamlit, spaCy, NLTK and Plotly.",
-    },
+    initial_sidebar_state="collapsed",
 )
 
-SAMPLE_TEXTS = {
-    "Technology & AI": (
-        "Sundar Pichai leads Google, and the company develops artificial intelligence products in California. "
-        "Microsoft invested in OpenAI in 2019, while researchers continue to study generative AI systems."
-    ),
-    "Business relationship": (
-        "Microsoft acquired GitHub in 2018. Satya Nadella leads Microsoft and the company partners with OpenAI."
-    ),
-    "Travel & places": (
-        "Alice travelled from Delhi to Budapest on Monday. She visited the Hungarian Parliament and met "
-        "researchers from Eötvös Loránd University."
-    ),
-    "Grammar showcase": (
-        "The curious students carefully analyzed several difficult sentences and presented their findings to the professor."
-    ),
-}
+inject_css()
+hero()
 
 
-@st.cache_resource(show_spinner="Loading the English NLP model…")
+@st.cache_resource(show_spinner=False)
 def get_nlp():
     return load_model()
 
 
-@st.cache_data(show_spinner=False, max_entries=64)
-def cached_doc_bytes(text: str) -> bytes:
-    return serialize_doc(get_nlp(), text)
+@st.cache_data(show_spinner=False, max_entries=32)
+def cached_analysis(text: str) -> AnalysisResult:
+    return analyze_text(text, get_nlp())
 
 
-def analyze(text: str):
-    payload = cached_doc_bytes(text)
-    return restore_doc(get_nlp(), payload)
+def _csv_bytes(rows):
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
 
 
-def export_bundle(text: str, tables: dict[str, pd.DataFrame], summary: dict) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("source.txt", text)
-        archive.writestr("summary.json", json.dumps(summary, indent=2))
-        for name, frame in tables.items():
-            archive.writestr(f"{name}.csv", frame.to_csv(index=False))
+def _analysis_zip(result: AnalysisResult) -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as zf:
+        zf.writestr("source.txt", result.text)
+        zf.writestr("summary.json", json.dumps(result.summary, indent=2))
+        zf.writestr("entities.csv", _csv_bytes(result.entities))
+        zf.writestr("relationships.csv", _csv_bytes(result.relationships))
+        zf.writestr("pos_tagging.csv", _csv_bytes(result.pos))
+        zf.writestr("pos_distribution.csv", _csv_bytes(result.pos_distribution))
+        zf.writestr("lemmatization.csv", _csv_bytes(result.lemmas))
+        zf.writestr("stemming.csv", _csv_bytes(result.stems))
+        morph_flat = [
+            {
+                "Token": row["Token"],
+                "POS": row["POS"],
+                "Morphology": row["Morphology"],
+                **row["Features"],
+            }
+            for row in result.morphology
+        ]
+        zf.writestr("morphology.csv", _csv_bytes(morph_flat))
     return buffer.getvalue()
 
 
-def state_init() -> None:
-    if "draft_text" not in st.session_state:
-        st.session_state.draft_text = SAMPLE_TEXTS["Technology & AI"]
-    if "analyzed_text" not in st.session_state:
-        st.session_state.analyzed_text = SAMPLE_TEXTS["Technology & AI"]
-    if "last_analysis_ms" not in st.session_state:
-        st.session_state.last_analysis_ms = None
+def _use_sample():
+    st.session_state.source_text = SAMPLE_TEXT
+    st.session_state.analysis = None
+    st.session_state.analyzed_text = ""
+    st.session_state.active_task = None
 
 
-state_init()
-inject_css(False)
-nlp = get_nlp()
+def _start_over():
+    st.session_state.source_text = ""
+    st.session_state.analysis = None
+    st.session_state.analyzed_text = ""
+    st.session_state.active_task = None
 
-with st.sidebar:
-    st.markdown("### ◉ LexiScope")
-    st.caption("Interactive linguistic intelligence")
-    st.divider()
 
-    st.markdown("**Workspace**")
-    sample = st.selectbox("Example dataset", list(SAMPLE_TEXTS.keys()), label_visibility="collapsed")
-    c1, c2 = st.columns(2)
-    if c1.button("Use example", use_container_width=True):
-        st.session_state.draft_text = SAMPLE_TEXTS[sample]
-        st.rerun()
-    if c2.button("Clear", use_container_width=True):
-        st.session_state.draft_text = ""
-        st.rerun()
+def _ensure_state():
+    st.session_state.setdefault("source_text", SAMPLE_TEXT)
+    st.session_state.setdefault("analysis", None)
+    st.session_state.setdefault("analyzed_text", "")
+    st.session_state.setdefault("active_task", None)
 
-    uploaded = st.file_uploader("Or import a .txt file", type=["txt"], help=f"Maximum analyzed text: {MAX_TEXT_CHARS:,} characters")
-    if uploaded is not None:
-        raw = uploaded.getvalue()
-        if len(raw) > 100_000:
-            st.error("That text file is too large for this demo workspace.")
-        else:
-            try:
-                decoded = raw.decode("utf-8")
-                if st.button("Load uploaded text", use_container_width=True):
-                    st.session_state.draft_text = decoded[:MAX_TEXT_CHARS]
-                    st.rerun()
-            except UnicodeDecodeError:
-                st.error("Please upload a UTF-8 encoded text file.")
 
-    st.divider()
-    st.markdown("**Engine status**")
-    st.markdown('<div class="small-muted"><span class="status-dot"></span>spaCy model loaded</div>', unsafe_allow_html=True)
-    st.caption("en_core_web_sm · tokenizer · tagger · parser · lemmatizer · NER")
-    st.caption("Health monitor: every 30 minutes")
+_ensure_state()
 
-hero()
+st.markdown('<div class="section-label">1 · Add text</div>', unsafe_allow_html=True)
 
-with st.form("analysis-form", border=False):
-    left, right = st.columns([5.2, 1.35], vertical_alignment="bottom")
-    with left:
-        st.text_area(
-            "Text to analyze",
-            key="draft_text",
-            height=178,
-            max_chars=MAX_TEXT_CHARS,
-            placeholder="Paste an English paragraph, sentence, report excerpt, or article passage…",
-            help="Changes are not processed until you press Analyze text.",
-        )
-    with right:
-        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-        submitted = st.form_submit_button("Analyze text  →", type="primary", use_container_width=True)
-        st.caption("Cached · private to this session")
-
-if submitted:
-    try:
-        normalized = normalize_input(st.session_state.draft_text)
-        started = time.perf_counter()
-        _ = analyze(normalized)
-        st.session_state.last_analysis_ms = int((time.perf_counter() - started) * 1000)
-        st.session_state.analyzed_text = normalized
-        st.toast("Analysis complete", icon="✅")
-    except ValueError as exc:
-        st.error(str(exc))
-    except Exception as exc:
-        st.error("The NLP pipeline could not process this input. Please simplify the text and try again.")
-        st.caption(f"Technical detail: {type(exc).__name__}")
-
-try:
-    doc = analyze(st.session_state.analyzed_text)
-except Exception:
-    st.error("The NLP model could not initialize. Verify that the spaCy model from requirements.txt installed successfully.")
-    st.stop()
-
-relations = relationship_rows(doc)
-summary = analysis_summary(doc, relations)
-
-metric_cols = st.columns(6)
-metric_values = [
-    ("Words", summary.words, f"{summary.characters:,} characters"),
-    ("Sentences", summary.sentences, "Detected boundaries"),
-    ("Entities", summary.entities, "Named mentions"),
-    ("Relations", summary.relationships, "SVO triples"),
-    ("POS classes", summary.unique_pos, "Unique categories"),
-    ("Pipeline", "Ready", f"{st.session_state.last_analysis_ms or 0} ms last submit" if st.session_state.last_analysis_ms is not None else "Cached sample"),
-]
-for col, (label, value, sub) in zip(metric_cols, metric_values):
-    with col:
-        metric_card(label, value, sub)
-
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-tabs = st.tabs(
-    [
-        "Overview",
-        "1 · Entity relations",
-        "2 · POS tagging",
-        "3 · POS distribution",
-        "4 · Lemmatization",
-        "5 · Stemming",
-        "6 · Morphology",
-        "7 · Dependencies",
-    ]
+text = st.text_area(
+    "Text to analyze",
+    key="source_text",
+    placeholder="Paste an English paragraph here…",
+    max_chars=MAX_CHARS,
+    label_visibility="collapsed",
 )
 
-# Precompute tables once per rerun. These operations are cheap after spaCy parsing.
-entity_df = entity_rows(doc)
-pos_df = token_rows(doc)
-dist_df = pos_distribution(doc)
-lemma_df = lemma_rows(doc)
-stem_df = stem_rows(doc)
-morph_df = morphology_rows(doc)
-expanded_morph_df = expanded_morphology_rows(doc)
-sent_df = sentence_rows(doc)
+left, right = st.columns([3, 1])
+with left:
+    analyze_clicked = st.button("Analyze text", type="primary", use_container_width=True)
+with right:
+    st.button("Use sample", use_container_width=True, on_click=_use_sample)
 
-with tabs[0]:
-    section_header("Workspace summary", "Analysis at a glance", "A compact overview of sentence structure, detected entities and downloadable analysis artifacts.")
-    ov1, ov2 = st.columns([1.4, 1])
-    with ov1:
-        st.markdown("#### Sentence map")
-        st.dataframe(sent_df, use_container_width=True, hide_index=True, height=min(330, 90 + len(sent_df) * 36))
-    with ov2:
-        st.markdown("#### Dominant POS classes")
-        if not dist_df.empty:
-            st.plotly_chart(pos_donut_chart(dist_df.head(8)), use_container_width=True, config={"displayModeBar": False})
-        else:
-            st.info("No word tokens detected.")
+st.caption(f"{len(text):,}/{MAX_CHARS:,} characters · Analysis runs only when you press Analyze text.")
 
-    st.markdown("#### Extracted relationships")
-    if relations.empty:
-        st.info("No clear subject–predicate–object relationship was detected. Try a sentence such as “Microsoft acquired GitHub in 2018.”")
+if analyze_clicked:
+    if not text.strip():
+        st.warning("Enter some English text first.")
+    elif len(text) > MAX_CHARS:
+        st.error(f"Please keep the input under {MAX_CHARS:,} characters.")
     else:
-        relation_pills(relations)
+        try:
+            with st.spinner("Analyzing language structure…"):
+                st.session_state.analysis = cached_analysis(text)
+                st.session_state.analyzed_text = text
+                if st.session_state.active_task is None:
+                    st.session_state.active_task = "NER"
+        except Exception as exc:
+            st.session_state.analysis = None
+            st.error("The NLP pipeline could not analyze this text.")
+            with st.expander("Technical details"):
+                st.code(str(exc))
 
-    summary_dict = {
-        "characters": summary.characters,
-        "words": summary.words,
-        "sentences": summary.sentences,
-        "entities": summary.entities,
-        "relationships": summary.relationships,
-        "unique_pos": summary.unique_pos,
-    }
-    tables = {
-        "entities": entity_df,
-        "relationships": relations,
-        "pos_tagging": pos_df,
-        "pos_distribution": dist_df,
-        "lemmatization": lemma_df,
-        "stemming": stem_df,
-        "morphology": morph_df,
-        "sentences": sent_df,
-    }
-    st.download_button(
-        "Download complete analysis (.zip)",
-        export_bundle(st.session_state.analyzed_text, tables, summary_dict),
-        file_name="lexiscope_analysis.zip",
-        mime="application/zip",
-        use_container_width=False,
-    )
+result: AnalysisResult | None = st.session_state.analysis
+is_stale = bool(result) and text != st.session_state.analyzed_text
 
-with tabs[1]:
-    section_header("Named-entity relationship", "Entities connected by syntax", "See named entities in context, then inspect transparent dependency-derived subject–relation–object triples.")
+if result:
+    st.markdown('<div class="section-label">2 · Analysis summary</div>', unsafe_allow_html=True)
+    metric_cards(result.summary)
+    if is_stale:
+        st.warning("The text has changed since the last analysis. Press **Analyze text** again before using the results.")
 
-    if doc.ents:
-        st.markdown("#### Entity highlighting")
-        ent_html = displacy.render(doc, style="ent", page=False)
-        components.html(
-            f"<div style='font-family:Inter,system-ui;padding:12px 8px;line-height:2.45;font-size:16px;color:#111827'>{ent_html}</div>",
-            height=260,
-            scrolling=True,
+    st.session_state.active_task = task_buttons(st.session_state.active_task, disabled=is_stale)
+
+    export_col, reset_col = st.columns([2, 1])
+    with export_col:
+        st.download_button(
+            "Download all results (.zip)",
+            data=_analysis_zip(result),
+            file_name="nlp_analysis.zip",
+            mime="application/zip",
+            use_container_width=True,
+            disabled=is_stale,
         )
-        ec1, ec2 = st.columns([3, 1])
-        with ec1:
-            label_filter = st.multiselect(
-                "Entity labels",
-                options=sorted(entity_df["Label"].unique().tolist()),
-                default=sorted(entity_df["Label"].unique().tolist()),
-            )
-            filtered_entities = entity_df[entity_df["Label"].isin(label_filter)] if label_filter else entity_df.iloc[0:0]
-            st.dataframe(filtered_entities, use_container_width=True, hide_index=True)
-        with ec2:
-            counts = entity_df["Label"].value_counts()
-            st.markdown("**Entity mix**")
-            for label, count in counts.items():
-                st.metric(label, int(count), help=str(entity_df.loc[entity_df["Label"] == label, "Meaning"].iloc[0]))
-    else:
-        st.info("No named entities were detected in this passage.")
+    with reset_col:
+        st.button("Start over", use_container_width=True, on_click=_start_over)
 
-    st.divider()
-    st.markdown("#### Relationship explorer")
-    if relations.empty:
-        st.info("No clear relationship triples were extracted from this text.")
-    else:
-        graph_rows = relations.head(24)
-        graph = relationship_graph(graph_rows)
-        if graph is not None:
-            st.plotly_chart(graph, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
-        if len(relations) > len(graph_rows):
-            st.caption(f"Graph shows the first {len(graph_rows)} relationships for readability; the table and export include all {len(relations)}.")
-        relation_pills(relations)
-        st.dataframe(relations, use_container_width=True, hide_index=True)
-        st.download_button("Export relationships", csv_bytes(relations), "entity_relationships.csv", "text/csv")
-        st.caption("Relationship extraction is an interpretable dependency heuristic, not a separately trained relation-classification model.")
+    task = st.session_state.active_task
 
-with tabs[2]:
-    section_header("Part-of-speech tagging", "Inspect every token", "Filter the token stream by grammatical class and inspect fine tags, lemmas, dependencies, entity labels and morphology.")
-    pos_options = sorted(pos_df["POS"].dropna().unique().tolist())
-    filter_col, search_col = st.columns([1, 1])
-    selected_pos = filter_col.multiselect("POS filter", pos_options, default=pos_options)
-    token_search = search_col.text_input("Find token", placeholder="e.g. Microsoft, analyzed, students")
-
-    filtered = pos_df[pos_df["POS"].isin(selected_pos)] if selected_pos else pos_df.iloc[0:0]
-    if token_search.strip():
-        filtered = filtered[filtered["Token"].str.contains(token_search.strip(), case=False, regex=False)]
-    st.dataframe(filtered, use_container_width=True, hide_index=True, height=410)
-
-    if not pos_df.empty:
-        inspector_token = st.selectbox("Token inspector", range(len(pos_df)), format_func=lambda i: f"{pos_df.iloc[i]['Token']} · {pos_df.iloc[i]['POS']}")
-        row = pos_df.iloc[inspector_token]
-        i1, i2, i3, i4 = st.columns(4)
-        i1.metric("POS", row["POS"])
-        i2.metric("Fine tag", row["Fine tag"])
-        i3.metric("Dependency", row["Dependency"])
-        i4.metric("Head", row["Head"])
-        st.caption(f"Lemma: **{row['Lemma']}** · Entity: **{row['Entity']}** · Morphology: **{row['Morphology']}**")
-    st.download_button("Export POS table", csv_bytes(pos_df), "pos_tagging.csv", "text/csv")
-
-with tabs[3]:
-    section_header("POS distribution", "Grammar as a distribution", "Compare frequency and proportional share of predicted part-of-speech categories.")
-    if dist_df.empty:
-        st.info("No word tokens were found.")
-    else:
-        chart_mode = st.radio("Visualization", ["Frequency", "Composition"], horizontal=True, label_visibility="collapsed")
-        if chart_mode == "Frequency":
-            st.plotly_chart(pos_bar_chart(dist_df), use_container_width=True, config={"displaylogo": False})
+    if task == "NER" and not is_stale:
+        result_header("Named-Entity Relationship", "See recognized entities first, then inspect deterministic subject → relation → object links from the dependency parse.")
+        if result.entities:
+            st.markdown(result.entity_html, unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame(result.entities)[["Text", "Label", "Meaning"]], use_container_width=True, hide_index=True)
+            st.download_button("Download entities CSV", _csv_bytes(result.entities), "entities.csv", "text/csv")
         else:
-            st.plotly_chart(pos_donut_chart(dist_df), use_container_width=True, config={"displaylogo": False})
-        st.dataframe(dist_df, use_container_width=True, hide_index=True)
+            st.info("No named entities were detected in this text.")
 
-with tabs[4]:
-    section_header("Lemmatization", "Words reduced by linguistic context", "Compare each surface token with spaCy's context-sensitive dictionary/base form.")
-    changed_lemmas = int((lemma_df["Changed"] == "Yes").sum()) if not lemma_df.empty else 0
-    l1, l2, l3 = st.columns(3)
-    l1.metric("Tokens evaluated", len(lemma_df))
-    l2.metric("Changed forms", changed_lemmas)
-    l3.metric("Unchanged", max(len(lemma_df) - changed_lemmas, 0))
-    st.dataframe(lemma_df, use_container_width=True, hide_index=True, height=360)
-    comp1, comp2 = st.columns(2)
-    with comp1:
-        st.markdown("**Original sequence**")
-        st.info(" ".join(t.text for t in doc if not t.is_space))
-    with comp2:
+        st.markdown("#### Relationships")
+        if result.relationships:
+            for row in result.relationships:
+                st.markdown(
+                    f"<div class='relation-card'><span class='relation-word'>{html.escape(str(row['Subject']))}</span>"
+                    f"<span class='relation-arrow'>→</span>{html.escape(str(row['Relation']))}<span class='relation-arrow'>→</span>"
+                    f"<span class='relation-word'>{html.escape(str(row['Object']))}</span><br><small>{html.escape(str(row['Sentence']))}</small></div>",
+                    unsafe_allow_html=True,
+                )
+            st.dataframe(pd.DataFrame(result.relationships), use_container_width=True, hide_index=True)
+            st.download_button("Download relationships CSV", _csv_bytes(result.relationships), "relationships.csv", "text/csv")
+        else:
+            st.info("No clear subject–relation–object triple was found. Try a sentence such as “Microsoft acquired GitHub.”")
+
+    elif task == "POS" and not is_stale:
+        result_header("POS Tagging", "Inspect each token's part of speech, fine-grained tag, lemma, dependency and syntactic head.")
+        df = pd.DataFrame(result.pos)
+        choices = ["All"] + sorted(df["POS"].dropna().unique().tolist())
+        selected = st.selectbox("Filter by POS", choices)
+        shown = df if selected == "All" else df[df["POS"] == selected]
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+        st.download_button("Download POS tagging CSV", _csv_bytes(result.pos), "pos_tagging.csv", "text/csv")
+
+    elif task == "DIST" and not is_stale:
+        result_header("POS Distribution", "Compare how often nouns, verbs, adjectives and other grammatical categories appear.")
+        df = pd.DataFrame(result.pos_distribution)
+        view = st.radio("Chart", ["Bar", "Donut"], horizontal=True)
+        if view == "Bar":
+            fig = px.bar(df, x="POS", y="Count", hover_data=["Meaning", "Percent"], text="Count")
+        else:
+            fig = px.pie(df, names="POS", values="Count", hole=.5, hover_data=["Meaning", "Percent"])
+        fig.update_layout(margin=dict(l=8, r=8, t=20, b=8), height=390, legend_title_text="POS")
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "responsive": True})
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.download_button("Download POS distribution CSV", _csv_bytes(result.pos_distribution), "pos_distribution.csv", "text/csv")
+
+    elif task == "LEMMA" and not is_stale:
+        result_header("Lemmatization", "Compare each token with its dictionary/base form.")
+        df = pd.DataFrame(result.lemmas)
+        changed = int(df["Changed"].sum()) if not df.empty else 0
+        st.metric("Forms changed", changed)
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.markdown("**Lemmatized sequence**")
-        st.success(" ".join(t.lemma_ for t in doc if not t.is_space))
+        st.code(" ".join(df["Lemma"].tolist()), wrap_lines=True)
+        st.download_button("Download lemmatization CSV", _csv_bytes(result.lemmas), "lemmatization.csv", "text/csv")
 
-with tabs[5]:
-    section_header("Stemming", "Rule-based word reduction", "NLTK's PorterStemmer removes affixes mechanically, so stems may not be dictionary words.")
-    changed_stems = int((stem_df["Changed"] == "Yes").sum()) if not stem_df.empty else 0
-    s1, s2, s3 = st.columns(3)
-    s1.metric("Tokens evaluated", len(stem_df))
-    s2.metric("Changed forms", changed_stems)
-    s3.metric("Algorithm", "Porter")
-    st.dataframe(stem_df, use_container_width=True, hide_index=True, height=360)
-    st.markdown("**Stemmed sequence**")
-    st.code(" ".join(stem_df["Stem"].astype(str).tolist()), language=None, wrap_lines=True)
+    elif task == "STEM" and not is_stale:
+        result_header("Stemming", "Use NLTK's Porter Stemmer to reduce tokens to algorithmic stems. Stems are not always valid dictionary words.")
+        df = pd.DataFrame(result.stems)
+        changed = int(df["Changed"].sum()) if not df.empty else 0
+        st.metric("Forms changed", changed)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.markdown("**Stemmed sequence**")
+        st.code(" ".join(df["Stem"].tolist()), wrap_lines=True)
+        st.download_button("Download stemming CSV", _csv_bytes(result.stems), "stemming.csv", "text/csv")
 
-with tabs[6]:
-    section_header("Morphological analysis", "Grammatical features at token level", "Inspect tense, number, person, degree, verb form, pronoun type and other available morphological features.")
-    st.dataframe(morph_df, use_container_width=True, hide_index=True, height=330)
-    if expanded_morph_df.empty:
-        st.info("No explicit morphological features were predicted for these tokens.")
-    else:
-        available_features = sorted(expanded_morph_df["Feature"].unique().tolist())
-        feature_filter = st.multiselect("Feature explorer", available_features, default=available_features[: min(5, len(available_features))])
-        expanded_filtered = expanded_morph_df[expanded_morph_df["Feature"].isin(feature_filter)] if feature_filter else expanded_morph_df.iloc[0:0]
-        st.dataframe(expanded_filtered, use_container_width=True, hide_index=True, height=300)
+    elif task == "MORPH" and not is_stale:
+        result_header("Morphology", "Inspect grammatical features such as tense, number, person, degree and verb form.")
+        flattened = []
+        for row in result.morphology:
+            flattened.append({"Token": row["Token"], "POS": row["POS"], "Morphology": row["Morphology"], **row["Features"]})
+        df = pd.DataFrame(flattened).fillna("—")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.download_button("Download morphology CSV", df.to_csv(index=False).encode("utf-8"), "morphology.csv", "text/csv")
 
-with tabs[7]:
-    section_header("Dependency parsing", "Syntactic structure · style=dep", "Select a sentence to visualize head–dependent arcs, then inspect each dependency in a structured table.")
-    sentences = list(doc.sents)
-    if not sentences:
-        st.info("No sentence boundary was detected.")
-    else:
-        sentence_idx = st.selectbox(
-            "Sentence",
-            range(len(sentences)),
-            format_func=lambda i: f"{i + 1}. {sentences[i].text.strip()[:150]}{'…' if len(sentences[i].text.strip()) > 150 else ''}",
-        )
-        sentence = sentences[sentence_idx]
-        dep_html = displacy.render(
-            sentence,
-            style="dep",
-            page=False,
-            options={"compact": False, "distance": 108, "add_lemma": True, "fine_grained": False},
-        )
-        components.html(
-            f"<div style='overflow-x:auto;background:#fff;padding:18px 12px;border:1px solid #eaecf0;border-radius:16px'>{dep_html}</div>",
-            height=485,
-            scrolling=True,
-        )
-        dep_df = dependency_rows(sentence)
-        st.dataframe(dep_df, use_container_width=True, hide_index=True)
-        root_token = next((t for t in sentence if t.dep_ == "ROOT"), None)
-        if root_token is not None:
-            st.caption(f"Sentence root: **{root_token.text}** · lemma **{root_token.lemma_}** · POS **{root_token.pos_}**")
-        st.download_button("Export dependency table", csv_bytes(dep_df), f"dependencies_sentence_{sentence_idx + 1}.csv", "text/csv")
+    elif task == "DEP" and not is_stale:
+        result_header("Dependencies · style=dep", "Choose a sentence and inspect its syntactic dependency arrows using spaCy's displaCy renderer.")
+        sentence_labels = [f"{row['index']}. {row['text']}" for row in result.dependency_sentences]
+        selected_label = st.selectbox("Sentence", sentence_labels)
+        idx = sentence_labels.index(selected_label)
+        sentence = result.dependency_sentences[idx]
+        st.markdown(f"<div class='dep-scroll'>{sentence['html']}</div>", unsafe_allow_html=True)
+        st.caption("On phones, swipe horizontally inside the dependency diagram if the sentence is wide.")
+        st.dataframe(pd.DataFrame(sentence["tokens"]), use_container_width=True, hide_index=True)
 
-st.markdown("---")
-st.caption("LexiScope · Problem Statement 5 · spaCy + NLTK + Plotly + Streamlit · Educational NLP analysis workspace")
+else:
+    st.markdown('<div class="section-label">2 · Pick a task after analysis</div>', unsafe_allow_html=True)
+    st.info("Press **Analyze text** first. The seven NLP operations will appear as separate buttons here.")

@@ -1,166 +1,220 @@
 from __future__ import annotations
 
 import html
-
 import streamlit as st
 
 
-LIGHT = {
-    "bg": "#f6f7fb",
-    "surface": "#ffffff",
-    "surface2": "#f9fafc",
-    "text": "#111827",
-    "muted": "#667085",
-    "border": "#e7e9ee",
-    "accent": "#625bf6",
-    "accent2": "#7c3aed",
-    "success": "#12b76a",
-}
-
-DARK = {
-    "bg": "#0b0d12",
-    "surface": "#11141b",
-    "surface2": "#171a22",
-    "text": "#f4f4f5",
-    "muted": "#a1a1aa",
-    "border": "#272a34",
-    "accent": "#8b83ff",
-    "accent2": "#a78bfa",
-    "success": "#32d583",
-}
+TASKS = [
+    ("Named-Entity Relationship", "Entities and subject → relation → object links", "NER"),
+    ("POS Tagging", "Part-of-speech details for every token", "POS"),
+    ("POS Distribution", "See how grammatical categories are distributed", "DIST"),
+    ("Lemmatization", "Convert words to their dictionary forms", "LEMMA"),
+    ("Stemming", "Reduce words with Porter stemming", "STEM"),
+    ("Morphology", "Inspect tense, number, person and more", "MORPH"),
+    ("Dependencies", "Visualize syntax with displaCy style=dep", "DEP"),
+]
 
 
-def inject_css(dark: bool = False) -> None:
-    t = DARK if dark else LIGHT
-    st.markdown(
-        f"""
-        <style>
-        :root {{
-            --app-bg:{t['bg']}; --app-surface:{t['surface']}; --app-surface-2:{t['surface2']};
-            --app-text:{t['text']}; --app-muted:{t['muted']}; --app-border:{t['border']};
-            --app-accent:{t['accent']}; --app-accent-2:{t['accent2']}; --app-success:{t['success']};
-        }}
-        .stApp {{ background: var(--app-bg); color: var(--app-text); }}
-        .block-container {{ max-width: 1440px; padding-top: 1.15rem; padding-bottom: 4rem; }}
-        [data-testid="stSidebar"] {{ background: var(--app-surface); border-right: 1px solid var(--app-border); }}
-        [data-testid="stSidebar"] * {{ color: var(--app-text); }}
-        h1,h2,h3,h4,p,span,label,div {{ letter-spacing: -0.01em; }}
-        h1 {{ letter-spacing: -0.045em !important; font-weight: 760 !important; }}
-        h2,h3 {{ letter-spacing: -0.025em !important; }}
-        [data-testid="stHeader"] {{ background: transparent; }}
-        [data-testid="stToolbar"] {{ right: 1rem; }}
-
-        .hero {{
-            position: relative; overflow: hidden; border: 1px solid var(--app-border);
-            background: linear-gradient(135deg, var(--app-surface) 0%, var(--app-surface-2) 100%);
-            border-radius: 24px; padding: 28px 30px; margin: 8px 0 20px;
-        }}
-        .hero:after {{
-            content:""; position:absolute; width:240px; height:240px; right:-80px; top:-110px;
-            border-radius:50%; background: radial-gradient(circle, rgba(98,91,246,.20), rgba(98,91,246,0) 70%);
-            pointer-events:none;
-        }}
-        .eyebrow {{ display:inline-flex; align-items:center; gap:8px; font-size:.78rem; font-weight:700;
-            color:var(--app-accent); text-transform:uppercase; letter-spacing:.08em; margin-bottom:10px; }}
-        .hero-title {{ font-size: clamp(1.8rem, 3vw, 3rem); line-height:1.04; font-weight:780; color:var(--app-text); max-width:850px; letter-spacing:-.045em; }}
-        .hero-copy {{ margin-top:12px; color:var(--app-muted); font-size:1rem; line-height:1.65; max-width:900px; }}
-        .hero-chip {{ display:inline-flex; margin:16px 7px 0 0; padding:7px 10px; border:1px solid var(--app-border);
-            border-radius:999px; color:var(--app-muted); background:var(--app-surface); font-size:.78rem; }}
-
-        .metric-card {{ border:1px solid var(--app-border); background:var(--app-surface); border-radius:18px;
-            padding:17px 18px; min-height:104px; }}
-        .metric-label {{ color:var(--app-muted); font-size:.78rem; font-weight:650; margin-bottom:9px; }}
-        .metric-value {{ color:var(--app-text); font-size:1.7rem; font-weight:760; letter-spacing:-.04em; line-height:1; }}
-        .metric-sub {{ color:var(--app-muted); font-size:.72rem; margin-top:8px; }}
-
-        .section-card {{ border:1px solid var(--app-border); background:var(--app-surface); border-radius:20px; padding:20px; margin-bottom:14px; }}
-        .section-kicker {{ color:var(--app-accent); font-size:.76rem; font-weight:750; text-transform:uppercase; letter-spacing:.075em; }}
-        .section-title {{ color:var(--app-text); font-size:1.25rem; font-weight:720; margin:3px 0 3px; }}
-        .section-copy {{ color:var(--app-muted); font-size:.88rem; line-height:1.55; }}
-
-        .relation-pill {{ display:inline-flex; align-items:center; gap:8px; padding:9px 12px; margin:4px 6px 4px 0;
-            background:var(--app-surface-2); border:1px solid var(--app-border); border-radius:12px; color:var(--app-text); font-size:.84rem; }}
-        .relation-pill b {{ color:var(--app-accent); }}
-        .status-dot {{ width:7px; height:7px; border-radius:50%; display:inline-block; background:var(--app-success); margin-right:6px; }}
-        .small-muted {{ color:var(--app-muted); font-size:.8rem; }}
-
-        div[data-testid="stDataFrame"] {{ border:1px solid var(--app-border); border-radius:14px; overflow:hidden; }}
-        div[data-testid="stMetric"] {{ background:var(--app-surface); border:1px solid var(--app-border); border-radius:16px; padding:12px; }}
-        div[data-baseweb="select"] > div, textarea, input {{ border-radius:12px !important; }}
-        [data-testid="stTextArea"] textarea {{ background:var(--app-surface) !important; border-color:var(--app-border) !important; color:var(--app-text) !important; line-height:1.55; }}
-        .stButton > button, .stDownloadButton > button {{ border-radius:12px; min-height:42px; font-weight:650; }}
-        .stButton > button[kind="primary"] {{ background:linear-gradient(135deg,var(--app-accent),var(--app-accent-2)); border:0; }}
-        [data-testid="stForm"] {{ border:0; padding:0; }}
-        [data-testid="stTabs"] [role="tablist"] {{ gap:7px; overflow-x:auto; padding-bottom:4px; }}
-        [data-testid="stTabs"] button[role="tab"] {{ border:1px solid var(--app-border); border-radius:11px; background:var(--app-surface); padding:8px 13px; }}
-        [data-testid="stTabs"] button[aria-selected="true"] {{ border-color:var(--app-accent); color:var(--app-accent); }}
-        hr {{ border-color:var(--app-border) !important; }}
-        @media (max-width: 760px) {{
-            .block-container {{ padding-left:1rem; padding-right:1rem; }}
-            .hero {{ padding:22px 19px; border-radius:19px; }}
-            .hero-title {{ font-size:1.85rem; }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def hero() -> None:
+def inject_css():
     st.markdown(
         """
-        <section class="hero">
-          <div class="eyebrow">◉ Linguistic intelligence workspace</div>
-          <div class="hero-title">Understand the structure behind any English text.</div>
-          <div class="hero-copy">Explore entities and relationships, syntax, word classes, lemmas, stems, morphology and dependency structure from one production-ready NLP workspace.</div>
-          <div>
-            <span class="hero-chip">spaCy pipeline</span>
-            <span class="hero-chip">NLTK stemming</span>
-            <span class="hero-chip">Interactive Plotly views</span>
-            <span class="hero-chip">Dependency graph</span>
-          </div>
-        </section>
+<style>
+:root {
+  --app-max: 1080px;
+}
+
+.block-container {
+  max-width: var(--app-max);
+  padding-top: 1.2rem;
+  padding-bottom: 3rem;
+}
+
+[data-testid="stHeader"] { background: rgba(255,255,255,0); }
+
+.app-kicker {
+  font-size: .78rem;
+  font-weight: 700;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+  opacity: .65;
+  margin-bottom: .35rem;
+}
+
+.app-title {
+  font-size: clamp(2rem, 5vw, 3.35rem);
+  line-height: 1.02;
+  font-weight: 800;
+  letter-spacing: -.045em;
+  margin: 0;
+}
+
+.app-subtitle {
+  font-size: clamp(1rem, 2.2vw, 1.15rem);
+  opacity: .72;
+  max-width: 720px;
+  margin-top: .8rem;
+  margin-bottom: 1.1rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  border: 1px solid rgba(128,128,128,.28);
+  border-radius: 999px;
+  padding: .38rem .7rem;
+  font-size: .82rem;
+  margin: .2rem .35rem .2rem 0;
+}
+
+.section-label {
+  font-size: .82rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  opacity: .58;
+  margin: 1.4rem 0 .45rem;
+}
+
+.task-help {
+  opacity: .64;
+  font-size: .9rem;
+  margin-top: -.2rem;
+  margin-bottom: .9rem;
+}
+
+.result-title {
+  font-size: clamp(1.45rem, 3.5vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -.025em;
+  margin: .2rem 0 .2rem;
+}
+
+.metric-card {
+  border: 1px solid rgba(128,128,128,.22);
+  border-radius: 16px;
+  padding: .85rem .9rem;
+  min-height: 86px;
+}
+.metric-card .metric-label { font-size:.78rem; opacity:.62; }
+.metric-card .metric-value { font-size:1.45rem; font-weight:800; margin-top:.18rem; }
+
+.relation-card {
+  border: 1px solid rgba(128,128,128,.22);
+  border-radius: 14px;
+  padding: .9rem;
+  margin: .55rem 0;
+  line-height: 1.55;
+}
+.relation-arrow { opacity:.62; padding:0 .3rem; }
+.relation-word { font-weight:800; }
+
+.entity-chip {
+  display:inline-flex;
+  gap:.4rem;
+  align-items:center;
+  border:1px solid rgba(128,128,128,.24);
+  border-radius:999px;
+  padding:.35rem .6rem;
+  margin:.18rem .2rem .18rem 0;
+  font-size:.86rem;
+}
+.entity-chip small { opacity:.58; }
+
+div.stButton > button {
+  min-height: 48px;
+  border-radius: 12px;
+  font-weight: 700;
+  width: 100%;
+}
+
+[data-testid="stTextArea"] textarea {
+  min-height: 155px;
+  border-radius: 14px;
+  font-size: 16px;
+}
+
+[data-testid="stFileUploader"] {
+  border-radius: 14px;
+}
+
+[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
+
+.dep-scroll {
+  overflow-x: auto;
+  padding: .75rem .25rem;
+  border: 1px solid rgba(128,128,128,.2);
+  border-radius: 14px;
+}
+.dep-scroll svg { min-width: 720px; }
+
+.mobile-note {
+  opacity:.6;
+  font-size:.82rem;
+  margin-top:.45rem;
+}
+
+@media (max-width: 700px) {
+  .block-container { padding-left: .9rem; padding-right: .9rem; padding-top:.7rem; }
+  [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; gap: .45rem !important; }
+  [data-testid="column"] { flex: 1 1 100% !important; width: 100% !important; min-width: 0 !important; }
+  .metric-card { min-height:72px; padding:.7rem .75rem; }
+  .app-subtitle { margin-bottom:.7rem; }
+  div.stButton > button { min-height: 52px; }
+}
+</style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def metric_card(label: str, value: str | int, sub: str) -> None:
+def hero():
+    st.markdown('<div class="app-kicker">NLP Analysis Workspace</div>', unsafe_allow_html=True)
+    st.markdown('<h1 class="app-title">Text analysis without the clutter.</h1>', unsafe_allow_html=True)
     st.markdown(
-        f"""
-        <div class="metric-card">
-          <div class="metric-label">{html.escape(label)}</div>
-          <div class="metric-value">{html.escape(str(value))}</div>
-          <div class="metric-sub">{html.escape(sub)}</div>
-        </div>
-        """,
+        '<div class="app-subtitle">Paste text once, analyze it, then open exactly the NLP operation you need. The interface is designed to stay simple on desktop and mobile.</div>',
         unsafe_allow_html=True,
     )
-
-
-def section_header(kicker: str, title: str, copy: str) -> None:
     st.markdown(
-        f"""
-        <div style="margin:4px 0 14px">
-          <div class="section-kicker">{html.escape(kicker)}</div>
-          <div class="section-title">{html.escape(title)}</div>
-          <div class="section-copy">{html.escape(copy)}</div>
-        </div>
-        """,
+        '<span class="status-pill">● spaCy pipeline</span><span class="status-pill">● NLTK stemming</span><span class="status-pill">● Mobile ready</span>',
         unsafe_allow_html=True,
     )
 
 
-def relation_pills(rows) -> None:
-    if rows.empty:
-        return
-    markup = []
-    for _, row in rows.head(8).iterrows():
-        markup.append(
-            '<span class="relation-pill">'
-            f'<span>{html.escape(str(row["Subject"]))}</span>'
-            f'<b>→ {html.escape(str(row["Relation"]))} →</b>'
-            f'<span>{html.escape(str(row["Object"]))}</span>'
-            '</span>'
-        )
-    st.markdown("".join(markup), unsafe_allow_html=True)
+def metric_cards(summary: dict[str, int]):
+    items = [
+        ("Words", summary.get("words", 0)),
+        ("Sentences", summary.get("sentences", 0)),
+        ("Entities", summary.get("entities", 0)),
+        ("Relations", summary.get("relationships", 0)),
+    ]
+    cols = st.columns(4)
+    for col, (label, value) in zip(cols, items):
+        with col:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">{html.escape(label)}</div><div class="metric-value">{value}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+
+def task_buttons(active_task: str | None, disabled: bool) -> str | None:
+    st.markdown('<div class="section-label">Choose an operation</div>', unsafe_allow_html=True)
+    selected = active_task
+
+    # Two rows on desktop. CSS turns every column into a full-width row on phones.
+    rows = [TASKS[:4], TASKS[4:]]
+    for row in rows:
+        cols = st.columns(len(row))
+        for col, (label, help_text, key) in zip(cols, row):
+            with col:
+                button_label = f"✓ {label}" if active_task == key else label
+                if st.button(button_label, key=f"task_{key}", use_container_width=True, disabled=disabled):
+                    selected = key
+                st.caption(help_text)
+    return selected
+
+
+def result_header(title: str, description: str):
+    st.divider()
+    st.markdown(f'<div class="result-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="task-help">{html.escape(description)}</div>', unsafe_allow_html=True)

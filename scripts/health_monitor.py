@@ -1,118 +1,90 @@
-#!/usr/bin/env python3
-"""Reliable health probe for the deployed Streamlit dashboard.
-
-Designed for GitHub Actions and local use. It checks Streamlit's documented
-/_stcore/health endpoint, retries transient failures, validates the response,
-and exits non-zero when the dashboard cannot be confirmed healthy.
-"""
-
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+
+import requests
 
 
 APP_URL = os.environ.get("APP_URL", "").strip().rstrip("/")
 ATTEMPTS = int(os.environ.get("HEALTH_ATTEMPTS", "5"))
-TIMEOUT_SECONDS = float(os.environ.get("HEALTH_TIMEOUT_SECONDS", "20"))
-INITIAL_BACKOFF_SECONDS = float(os.environ.get("HEALTH_INITIAL_BACKOFF_SECONDS", "2"))
+TIMEOUT = int(os.environ.get("HEALTH_TIMEOUT", "20"))
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def fail(message: str) -> None:
+    print(f"ERROR: {message}")
+    raise SystemExit(1)
 
 
-def is_healthy_body(body: str) -> bool:
-    """Accept current Streamlit health response formats without being brittle."""
-    normalized = body.strip().lower()
-    if normalized in {"ok", "healthy"}:
+def check_once(session: requests.Session, attempt: int) -> bool:
+    health_url = urljoin(APP_URL + "/", "_stcore/health")
+    started = time.perf_counter()
+
+    try:
+        health = session.get(health_url, timeout=TIMEOUT, allow_redirects=True)
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        body = health.text.strip().lower()
+
+        health_ok = health.status_code == 200 and (body in {"ok", "healthy"} or "ok" in body)
+        if not health_ok:
+            print(
+                f"FAIL attempt {attempt}/{ATTEMPTS}: health endpoint returned "
+                f"HTTP {health.status_code} in {elapsed_ms} ms; body={body[:120]!r}"
+            )
+            return False
+
+        # Also verify that the public root page is reachable. This catches cases
+        # where the Streamlit process answers health checks but the deployment
+        # route itself is broken.
+        root_started = time.perf_counter()
+        root = session.get(APP_URL + "/", timeout=TIMEOUT, allow_redirects=True)
+        root_ms = round((time.perf_counter() - root_started) * 1000)
+        content_type = root.headers.get("content-type", "").lower()
+        root_ok = root.status_code == 200 and ("text/html" in content_type or len(root.content) > 200)
+
+        if not root_ok:
+            print(
+                f"FAIL attempt {attempt}/{ATTEMPTS}: root page returned "
+                f"HTTP {root.status_code} in {root_ms} ms; content-type={content_type!r}"
+            )
+            return False
+
+        print(
+            f"PASS attempt {attempt}/{ATTEMPTS}: health HTTP 200 ({elapsed_ms} ms), "
+            f"root HTTP 200 ({root_ms} ms). Dashboard is healthy."
+        )
         return True
 
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return "ok" in normalized and len(normalized) < 256
-
-    if isinstance(payload, dict):
-        status = str(payload.get("status", "")).strip().lower()
-        return status in {"ok", "healthy"}
-    return False
+    except requests.RequestException as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        print(f"FAIL attempt {attempt}/{ATTEMPTS} after {elapsed_ms} ms: {exc}")
+        return False
 
 
-def probe(url: str) -> tuple[bool, str]:
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "nlp-dashboard-health-monitor/1.0",
-            "Accept": "text/plain, application/json;q=0.9, */*;q=0.1",
-            "Cache-Control": "no-cache",
-        },
-        method="GET",
-    )
-
-    started = time.monotonic()
-    try:
-        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            status = getattr(response, "status", response.getcode())
-            body = response.read(4096).decode("utf-8", errors="replace")
-            latency_ms = int((time.monotonic() - started) * 1000)
-            if status != 200:
-                return False, f"HTTP {status} in {latency_ms} ms"
-            if not is_healthy_body(body):
-                preview = " ".join(body.strip().split())[:160]
-                return False, f"HTTP 200 but unexpected health body in {latency_ms} ms: {preview!r}"
-            return True, f"HTTP 200, healthy, {latency_ms} ms"
-    except HTTPError as exc:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        return False, f"HTTP {exc.code} after {latency_ms} ms"
-    except URLError as exc:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        return False, f"network error after {latency_ms} ms: {exc.reason}"
-    except TimeoutError:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        return False, f"timeout after {latency_ms} ms"
-    except Exception as exc:  # Defensive: monitor must fail loudly, not crash silently.
-        latency_ms = int((time.monotonic() - started) * 1000)
-        return False, f"{type(exc).__name__} after {latency_ms} ms: {exc}"
-
-
-def main() -> int:
+def main() -> None:
     if not APP_URL:
-        print("ERROR: APP_URL is not configured.")
-        print("Create the GitHub Actions repository secret APP_URL with your Replit deployment URL.")
-        return 2
+        fail("APP_URL is missing. Add it as a GitHub Actions repository secret.")
+    if not APP_URL.startswith(("http://", "https://")):
+        fail("APP_URL must start with http:// or https://")
 
-    if not APP_URL.startswith(("https://", "http://")):
-        print(f"ERROR: APP_URL must start with http:// or https://, got: {APP_URL!r}")
-        return 2
+    print(f"Monitoring {APP_URL}")
+    print(f"Attempts={ATTEMPTS}, timeout={TIMEOUT}s")
 
-    health_url = urljoin(APP_URL + "/", "_stcore/health")
-    print(f"[{utc_now()}] Monitoring {health_url}")
-    print(f"Attempts={ATTEMPTS}, timeout={TIMEOUT_SECONDS:g}s")
+    session = requests.Session()
+    session.headers.update({"User-Agent": "nlp-dashboard-health-monitor/1.0"})
 
-    backoff = INITIAL_BACKOFF_SECONDS
     for attempt in range(1, ATTEMPTS + 1):
-        healthy, detail = probe(health_url)
-        marker = "PASS" if healthy else "FAIL"
-        print(f"[{utc_now()}] {marker} attempt {attempt}/{ATTEMPTS}: {detail}")
-        if healthy:
-            print(f"[{utc_now()}] Dashboard is healthy: {APP_URL}")
-            return 0
-
+        if check_once(session, attempt):
+            return
         if attempt < ATTEMPTS:
-            print(f"Retrying in {backoff:g}s...")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 20)
+            delay = min(5 * (2 ** (attempt - 1)), 30)
+            print(f"Retrying in {delay}s…")
+            time.sleep(delay)
 
-    print(f"[{utc_now()}] ERROR: dashboard did not become healthy after {ATTEMPTS} attempts.")
-    return 1
+    fail(f"Dashboard remained unhealthy after {ATTEMPTS} attempts.")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
