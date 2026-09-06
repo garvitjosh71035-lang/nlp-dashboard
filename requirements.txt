@@ -1,6 +1,6 @@
 streamlit==1.49.1
 spacy==3.8.7
-nltk==3.9.1
+nltk==3.10.3
 pandas==2.3.2
 plotly==6.3.0
 requests==2.32.5

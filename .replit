@@ -3,3 +3,7 @@ entrypoint = "app.py"
 
 [nix]
 channel = "stable-24_05"
+
+[deployment]
+build = "python -m pip install -r requirements.txt"
+run = "bash run.sh"
