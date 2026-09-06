@@ -1,9 +1,10 @@
 run = "bash run.sh"
 entrypoint = "app.py"
+modules = ["python-3.12"]
 
 [nix]
-channel = "stable-24_05"
+channel = "stable-25_05"
 
 [deployment]
-build = "python -m pip install -r requirements.txt"
+build = "python3 -m pip install -r requirements.txt"
 run = "bash run.sh"
