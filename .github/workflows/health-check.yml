@@ -1,0 +1,31 @@
+name: Continuous dashboard health monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run twice per hour, offset from the top of the hour to reduce queue congestion.
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nlp-dashboard-health-monitor
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Check out monitor script
+        uses: actions/checkout@v4
+
+      - name: Probe Streamlit health endpoint
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          HEALTH_ATTEMPTS: "5"
+          HEALTH_TIMEOUT_SECONDS: "20"
+          HEALTH_INITIAL_BACKOFF_SECONDS: "2"
+        run: python scripts/health_monitor.py
