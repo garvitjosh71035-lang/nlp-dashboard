@@ -6,5 +6,5 @@ modules = ["python-3.12"]
 channel = "stable-25_05"
 
 [deployment]
-build = "bash build.sh"
+build = "echo 'Using Replit-managed Python dependencies'"
 run = "bash run.sh"
