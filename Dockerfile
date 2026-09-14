@@ -7,7 +7,7 @@ COPY requirements.txt .
 
 # Install dependencies including spaCy models
 RUN pip install --no-cache-dir -r requirements.txt
-RUN python -m spacy download en_core_web_sm
+RUN python -m pip install --upgrade spacy && python -m spacy download en_core_web_sm
 
 # Copy application code
 COPY . .
